@@ -4,11 +4,15 @@
 
 #![allow(unused)]
 
+use core::borrow::BorrowMut;
 use core::iter::Iterator;
+use core::ops::Deref;
 use core::sync::atomic::AtomicPtr;
 
+use kernel::driver::DeviceRemoval;
+use kernel::net::filter::netdev;
 use kernel::pci::Resource;
-use kernel::prelude::*;
+use kernel::{prelude::*, AlwaysRefCounted};
 use kernel::sync::Arc;
 use kernel::{pci, device, driver, bindings, net, dma, c_str};
 use kernel::device::RawDevice;
@@ -142,6 +146,12 @@ impl NetDevice {
     }
 
 
+}
+
+impl Drop for NetDevice {
+    fn drop(&mut self) {
+        pr_info!("Rust for linux e1000 driver demo drop NetDevice\n");
+    }
 }
 
 #[vtable]
@@ -298,6 +308,20 @@ struct E1000DrvPrvData {
 impl driver::DeviceRemoval for E1000DrvPrvData {
     fn device_remove(&self) {
         pr_info!("Rust for linux e1000 driver demo (device_remove)\n");
+        let mut dev = &self._netdev_reg.dev_get();
+        // let dev = (*&self._netdev_reg.dev_get()) as *const bindings::net_device;
+        unsafe {
+            let a = (*dev);
+            
+            let parent = (*dev).dev.parent as *mut bindings::device;
+        }
+        
+
+        // let dev = unsafe { (dev as *const pci::Device) }.raw_device();
+        // unsafe {
+        //     let bars = bindings::pci_select_bars(dev, (bindings::IORESOURCE_MEM | bindings::IORESOURCE_IO) as u64);
+        //     bindings::pci_release_selected_regions(dev, bars);
+        // }
     }
 }
 
@@ -468,6 +492,15 @@ impl pci::Driver for E1000Drv {
 
     fn remove(data: &Self::Data) {
         pr_info!("Rust for linux e1000 driver demo (remove)\n");
+        // let dev = data._netdev_reg.dev_get();
+        // let bars = dev.select_bars((bindings::IORESOURCE_MEM | bindings::IORESOURCE_IO) as u64);
+        // dev.release_selected_regions(bars);
+        // pr_info!("release_selected_regions\n");
+
+        let netdev = data._netdev_reg.dev_get();
+        netdev.netif_stop_queue();
+        netdev.netif_carrier_off();
+        data.device_remove();
     }
 }
 struct E1000KernelMod {
