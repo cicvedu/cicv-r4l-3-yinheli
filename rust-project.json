@@ -43331,7 +43331,7 @@
             },
             "is_proc_macro": false,
             "is_workspace_member": true,
-            "root_module": "samples/linux/rust/rust_chrdev.rs"
+            "root_module": "linux/samples/rust/rust_chrdev.rs"
         },
         {
             "cfg": [
