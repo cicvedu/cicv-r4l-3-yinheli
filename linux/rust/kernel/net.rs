@@ -479,6 +479,13 @@ impl Napi {
         }
     }
 
+    /// Disable NAPI scheduling
+    pub fn disable(&self) {
+        unsafe {
+            bindings::napi_disable(self.0.get());
+        }
+    }
+
     /// Schedule NAPI poll routine to be called if it is not already running.
     pub fn schedule(&self) {
         // SAFETY: The existence of a shared reference means `self.0` is valid.

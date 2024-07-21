@@ -7,11 +7,12 @@
 use core::borrow::BorrowMut;
 use core::iter::Iterator;
 use core::ops::Deref;
-use core::sync::atomic::AtomicPtr;
+use core::sync::atomic::{AtomicPtr, Ordering};
+use core::time::Duration;
 
 use kernel::driver::DeviceRemoval;
 use kernel::net::filter::netdev;
-use kernel::pci::Resource;
+use kernel::pci::{Device, Resource};
 use kernel::{prelude::*, AlwaysRefCounted};
 use kernel::sync::Arc;
 use kernel::{pci, device, driver, bindings, net, dma, c_str};
@@ -188,7 +189,7 @@ impl net::DeviceOperations for NetDevice {
         // we mustn't let it dropped.
         // TODO: there is memory leak now. 
         let req_reg = kernel::irq::Registration::<E1000InterruptHandler>::try_new(data.irq, irq_prv_data, kernel::irq::flags::SHARED, fmt!("{}",data.dev.name()))?;
-        data._irq_handler.store(Box::into_raw(Box::try_new(req_reg)?), core::sync::atomic::Ordering::Relaxed);
+        data._irq_handler.store(Box::into_raw(Box::try_new(req_reg)?), Ordering::Relaxed);
 
         data.napi.enable();
 
@@ -199,11 +200,29 @@ impl net::DeviceOperations for NetDevice {
         Ok(())
     }
 
-    fn stop(_dev: &net::Device, _data: &NetDevicePrvData) -> Result {
-        pr_info!("Rust for linux e1000 driver demo (net device stop)\n");
+    fn stop(dev: &net::Device, data: &NetDevicePrvData) -> Result {
+        pr_info!("Rust for linux e1000 driver demo (net device stop)");
+        dev.netif_carrier_off();
+        dev.netif_stop_queue();
+        data.napi.disable();
+
+        data.e1000_hw_ops.e1000_reset_hw()?;
+        data._irq_handler
+            .store(core::ptr::null_mut(), Ordering::Relaxed);
+
+        pr_info!("release dma");
+
+
+        kernel::delay::coarse_sleep(Duration::from_millis(1000));        
+
+        let _ = data.tx_ring.lock_irqdisable().take();
+
+        kernel::delay::coarse_sleep(Duration::from_millis(1000));
+
+        let _ = data.rx_ring.lock_irqdisable().take();
+
         Ok(())
     }
-
 
     fn start_xmit(skb: &net::SkBuff, dev: &net::Device, data: &NetDevicePrvData) -> net::NetdevTx {
 
@@ -303,25 +322,16 @@ impl kernel::irq::Handler for E1000InterruptHandler {
 /// the private data for the adapter
 struct E1000DrvPrvData {
     _netdev_reg: net::Registration<NetDevice>,
+    dev: AtomicPtr<bindings::pci_dev>,
+    bars: i32,
 }
+
+use kernel::linked_list::Wrapper;
 
 impl driver::DeviceRemoval for E1000DrvPrvData {
     fn device_remove(&self) {
         pr_info!("Rust for linux e1000 driver demo (device_remove)\n");
-        let mut dev = &self._netdev_reg.dev_get();
-        // let dev = (*&self._netdev_reg.dev_get()) as *const bindings::net_device;
-        unsafe {
-            let a = (*dev);
-            
-            let parent = (*dev).dev.parent as *mut bindings::device;
-        }
-        
-
-        // let dev = unsafe { (dev as *const pci::Device) }.raw_device();
-        // unsafe {
-        //     let bars = bindings::pci_select_bars(dev, (bindings::IORESOURCE_MEM | bindings::IORESOURCE_IO) as u64);
-        //     bindings::pci_release_selected_regions(dev, bars);
-        // }
+        drop(&self._netdev_reg);
     }
 }
 
@@ -378,7 +388,11 @@ impl net::NapiPoller for NapiHandler {
 
 struct E1000Drv {}
 
-
+impl Drop for E1000Drv {
+    fn drop(&mut self) {
+        pr_info!("Rust for linux e1000 driver demo (drop e1000 drv)");
+    }
+}
 
 impl pci::Driver for E1000Drv {
 
@@ -394,6 +408,7 @@ impl pci::Driver for E1000Drv {
         pr_info!("Rust for linux e1000 driver demo (probe): {:?}\n", id);
 
         // Note: only support QEMU's 82540EM chip now.
+
         
         // this works like a filter, the PCI device may have up to 6 bars, those bars have different types,
         // some of them are mmio, others are io-port based. The params to the following function is a 
@@ -404,7 +419,9 @@ impl pci::Driver for E1000Drv {
         dev.enable_device()?;
 
         // ask the os to reserve the physical memory region of the selected bars.
+        pr_info!("request_selected_regions");
         dev.request_selected_regions(bars, c_str!("e1000 reserved memory"))?;
+        pr_info!("request_selected_regions done");
 
         // set device to master mode.
         dev.set_master();
@@ -480,27 +497,37 @@ impl pci::Driver for E1000Drv {
             }
         )?)?;
 
-        
-
         Ok(Box::try_new(
             E1000DrvPrvData{
                 // Must hold this registration, or the device will be removed.
                 _netdev_reg: netdev_reg,
+                dev: dev.ptr(),
+                bars,
             }
         )?)
     }
 
     fn remove(data: &Self::Data) {
         pr_info!("Rust for linux e1000 driver demo (remove)\n");
-        // let dev = data._netdev_reg.dev_get();
-        // let bars = dev.select_bars((bindings::IORESOURCE_MEM | bindings::IORESOURCE_IO) as u64);
-        // dev.release_selected_regions(bars);
-        // pr_info!("release_selected_regions\n");
+        // let mut netdev_reg = &data._netdev_reg;
+        // let netdev = netdev_reg.dev_get();
+        // netdev.netif_carrier_off();
+        // netdev.netif_stop_queue();
 
-        let netdev = data._netdev_reg.dev_get();
-        netdev.netif_stop_queue();
-        netdev.netif_carrier_off();
-        data.device_remove();
+
+
+        unsafe {
+            let ptr = data.dev.load(Ordering::Relaxed);
+            let dev = pci::Device::from_ptr(ptr);
+            
+            // dev.release();
+
+            bindings::pci_release_selected_regions(ptr, data.bars);
+            bindings::pci_clear_master(ptr);
+            bindings::pci_disable_device(ptr);
+        }
+
+        pr_info!("release device");
     }
 }
 struct E1000KernelMod {
@@ -521,5 +548,6 @@ impl kernel::Module for E1000KernelMod {
 impl Drop for E1000KernelMod {
     fn drop(&mut self) {
         pr_info!("Rust for linux e1000 driver demo (exit)\n");
+        drop(&self._dev);
     }
 }
