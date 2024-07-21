@@ -4,16 +4,13 @@
 //!
 //! C header: [`include/linux/pci.h`](../../../../include/linux/pci.h)
 
+use core::sync::atomic::AtomicPtr;
+
 use crate::{
-    bindings, device, driver,
-    error::{
+    bindings, device, driver, error::{
         code::{EINVAL, ENOMEM},
         from_kernel_result, Error, Result,
-    },
-    str::CStr,
-    to_result,
-    types::PointerWrapper,
-    ThisModule,
+    }, str::CStr, to_result, types::PointerWrapper, ThisModule
 };
 
 /// An adapter for the registration of PCI drivers.
@@ -267,7 +264,7 @@ impl Device {
     ///
     /// `ptr` must be non-null and valid. It must remain valid for the lifetime of the returned
     /// instance.
-    unsafe fn from_ptr(ptr: *mut bindings::pci_dev) -> Self {
+    pub unsafe fn from_ptr(ptr: *mut bindings::pci_dev) -> Self {
         Self { ptr }
     }
 
@@ -327,6 +324,21 @@ impl Device {
     pub fn map_resource(&self, resource: &Resource, len: usize) -> Result<MappedResource> {
         MappedResource::try_new(resource.start, len)
     }
+
+    /// Get ptr
+    pub fn ptr(&self) -> AtomicPtr<bindings::pci_dev> {
+        AtomicPtr::new(self.ptr)
+    }
+
+    /// Release device
+    pub fn release(&self) {
+        unsafe {
+            bindings::pci_release_regions(self.ptr);
+            bindings::pci_clear_master(self.ptr);
+            bindings::pci_disable_device(self.ptr);
+        }
+    }
+
 }
 
 unsafe impl device::RawDevice for Device {
